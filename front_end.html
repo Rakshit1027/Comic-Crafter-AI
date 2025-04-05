@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LlamaGen AI</title>
+    <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Pacifico&family=Comic+Neue:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/remixicon/4.6.0/remixicon.min.css">
+    <style>
+        .comic-border {
+            border: 3px solid #000;
+            box-shadow: 4px 4px 0 #000;
+        }
+        .speech-bubble {
+            position: relative;
+            border-radius: 20px;
+            padding: 15px;
+            margin: 15px;
+            max-width: 70%;
+        }
+        .speech-bubble::after {
+            content: '';
+            position: absolute;
+            bottom: 15px;
+            width: 20px;
+            height: 20px;
+        }
+        .speech-bubble.ai::after {
+            left: -10px;
+            border-right: 15px solid #e5e7eb;
+            border-bottom: 15px solid transparent;
+        }
+        .speech-bubble.user::after {
+            right: -10px;
+            border-left: 15px solid #8a5cf7;
+            border-bottom: 15px solid transparent;
+        }
+        .aura-text {
+            background: linear-gradient(90deg, #b28dff, #ff9ed8, #7dc4ff);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .loading-spinner {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .panel-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        .panel-item {
+            position: relative;
+            overflow: hidden;
+        }
+        .panel-number {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0,0,0,0.7);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-white to-purple-50 font-['Comic_Neue'] min-h-screen p-4">
+    <header class="bg-white bg-opacity-80 backdrop-blur-sm shadow-md mb-8">
+        <nav class="container mx-auto px-4 py-4 flex items-center justify-between">
+            <div class="text-2xl font-['Pacifico'] aura-text">
+                LlamaGen AI
+            </div>
+            <img src="https://placehold.co/40x40?text=Ghibli+Logo" alt="Ghibli Logo" class="w-10 h-10 rounded-full">
+        </nav>
+    </header>
+
+    <main class="container mx-auto px-4 flex flex-col md:flex-row gap-8">
+        <!-- Chat Section (Left Side) -->
+        <div class="w-full md:w-1/2 flex flex-col">
+            <div class="flex flex-col items-center gap-4 mb-6">
+                <h1 class="text-3xl md:text-4xl font-bold text-center aura-text">Chat with AI</h1>
+                <p class="text-md md:text-lg text-gray-700 text-center">Describe your comic idea and we'll generate it!</p>
+            </div>
+            <div class="comic-border bg-white bg-opacity-90 p-6 rounded-lg flex-1">
+                <div id="chat-container" class="h-[300px] md:h-[400px] overflow-y-auto mb-4">
+                    <div class="speech-bubble ai bg-gray-100">
+                        <p>Hello! I'm your manga AI assistant. Please describe your comic idea and I'll generate a story and panels for you!</p>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <input type="text" id="user-input" class="flex-1 comic-border rounded-lg px-4 py-2 bg-white bg-opacity-90" placeholder="Describe your comic idea...">
+                    <button id="send-btn" class="bg-primary text-white w-12 h-12 rounded-lg flex items-center justify-center hover:bg-opacity-90 transition-all cursor-pointer shadow-lg">
+                        <i class="ri-send-plane-fill text-xl"></i>
+                    </button>
+                </div>
+                <div class="mt-4 hidden" id="pdf-upload-container">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Optional: Upload reference PDF</label>
+                    <input type="file" id="pdf-upload" accept=".pdf" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-primary file:text-white hover:file:bg-primary-dark">
+                </div>
+            </div>
+        </div>
+
+        <!-- Manga Panel Section (Right Side) -->
+        <div class="w-full md:w-1/2 flex flex-col">
+            <div class="flex flex-col items-center gap-4 mb-6">
+                <h1 class="text-3xl md:text-4xl font-bold text-center aura-text">Manga Panels</h1>
+                <p class="text-md md:text-lg text-gray-700 text-center">Your generated panels will appear here!</p>
+            </div>
+            <div id="manga-panel" class="comic-border bg-white bg-opacity-90 p-6 rounded-lg flex-1">
+                <div id="panel-container" class="flex flex-col items-center justify-center h-full">
+                    <p class="text-gray-600">Waiting for your idea...</p>
+                </div>
+            </div>
+            <div id="story-container" class="comic-border bg-white bg-opacity-90 p-6 rounded-lg mt-4 hidden">
+                <h3 class="font-bold text-lg mb-2">Generated Story</h3>
+                <div id="story-content" class="text-gray-700"></div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const userInput = document.getElementById('user-input');
+        const sendBtn = document.getElementById('send-btn');
+        const chatContainer = document.getElementById('chat-container');
+        const panelContainer = document.getElementById('panel-container');
+        const storyContainer = document.getElementById('story-container');
+        const storyContent = document.getElementById('story-content');
+        const pdfUploadContainer = document.getElementById('pdf-upload-container');
+        const pdfUpload = document.getElementById('pdf-upload');
+
+        // Show/hide PDF upload based on user input
+        userInput.addEventListener('input', () => {
+            if (userInput.value.trim().length > 10) {
+                pdfUploadContainer.classList.remove('hidden');
+            } else {
+                pdfUploadContainer.classList.add('hidden');
+            }
+        });
+
+        // Send button event listener
+        sendBtn.addEventListener('click', async () => {
+            const userMessage = userInput.value.trim();
+            if (!userMessage) return;
+
+            addMessage(userMessage, 'user');
+            userInput.value = '';
+            pdfUploadContainer.classList.add('hidden');
+
+            // Show loading state
+            const loadingMessage = showTypingIndicator();
+            panelContainer.innerHTML = '<div class="flex flex-col items-center"><div class="loading-spinner border-4 border-primary border-t-transparent rounded-full w-12 h-12 mb-2"></div><p>Generating your comic...</p></div>';
+
+            try {
+                // Prepare form data
+                const formData = new FormData();
+                formData.append('prompt', userMessage);
+                formData.append('panel_count', '4'); // Default to 4 panels
+                
+                // Add PDF if uploaded
+                if (pdfUpload.files.length > 0) {
+                    formData.append('pdf_reference', pdfUpload.files[0]);
+                }
+
+                // Send request to backend
+                const response = await fetch('/generate-comic', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to generate comic');
+                }
+
+                const data = await response.json();
+
+                // Update UI with results
+                loadingMessage.remove();
+                addMessage(`Here's your generated comic based on "${userMessage}"!`, 'ai');
+                
+                // Display panels
+                displayPanels(data.pages);
+                
+                // Display story
+                storyContent.innerHTML = data.story.replace(/\n/g, '<br>');
+                storyContainer.classList.remove('hidden');
+                
+            } catch (error) {
+                console.error('Error:', error);
+                loadingMessage.remove();
+                addMessage("Sorry, I couldn't generate your comic. Please try again later.", 'ai');
+                panelContainer.innerHTML = '<p class="text-red-500">Error generating comic. Please try again.</p>';
+            }
+        });
+
+        // Enter key event listener
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendBtn.click();
+            }
+        });
+
+        // Function to add message to chat
+        function addMessage(text, sender) {
+            const bubble = document.createElement('div');
+            bubble.className = `speech-bubble ${sender} ${sender === 'user' ? 'bg-primary text-white ml-auto shadow-md' : 'bg-gray-100 shadow-sm'}`;
+            bubble.innerHTML = `<p>${text}</p>`;
+            chatContainer.appendChild(bubble);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // Function to show typing indicator
+        function showTypingIndicator() {
+            const typing = document.createElement('div');
+            typing.className = 'speech-bubble ai bg-gray-100';
+            typing.innerHTML = '<p>Creating your manga panels...</p>';
+            chatContainer.appendChild(typing);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return typing;
+        }
+
+        // Function to display generated panels
+        function displayPanels(pages) {
+            panelContainer.innerHTML = '';
+            
+            if (pages.length === 0) {
+                panelContainer.innerHTML = '<p>No panels were generated.</p>';
+                return;
+            }
+
+            // Create a grid for panels
+            const grid = document.createElement('div');
+            grid.className = 'panel-grid w-full';
+            
+            pages.forEach((page, index) => {
+                const panelDiv = document.createElement('div');
+                panelDiv.className = 'panel-item comic-border rounded-lg overflow-hidden';
+                
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${page}`;
+                img.alt = `Panel ${index + 1}`;
+                img.className = 'w-full h-auto';
+                
+                const panelNumber = document.createElement('div');
+                panelNumber.className = 'panel-number';
+                panelNumber.textContent = `Panel ${index + 1}`;
+                
+                panelDiv.appendChild(img);
+                panelDiv.appendChild(panelNumber);
+                grid.appendChild(panelDiv);
+            });
+            
+            panelContainer.appendChild(grid);
+        }
+
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#8a5cf7',
+                        'primary-dark': '#7b4ce6',
+                    },
+                    borderRadius: {
+                        'button': '8px'
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>

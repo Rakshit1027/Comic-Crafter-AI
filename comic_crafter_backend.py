@@ -1,73 +1,45 @@
-from flask import Flask, request, jsonify, send_from_directory
-from werkzeug.utils import secure_filename
 import torch
 from transformers import pipeline
 from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
+import gradio as gr
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
 import time
+import re
 import os
+import PyPDF2
 from io import BytesIO
-import base64
-import tempfile
-from flask_cors import CORS
-import threading
-from pyngrok import ngrok
+import requests
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Install required packages
-!pip install -q flask flask-cors torch transformers diffusers pillow PyPDF2 xformers pyngrok
-
-# Try to import PyPDF2 with fallback
-try:
-    import PyPDF2
-    PDF_SUPPORT = True
-except ImportError:
-    print("⚠ PyPDF2 not installed. PDF reference functionality will be disabled.")
-    PDF_SUPPORT = False
-
-# Initialize Flask app
-app = Flask(_name_, static_folder='static')
-CORS(app)
-
-# Configuration
-UPLOAD_FOLDER = tempfile.mkdtemp()
-ALLOWED_EXTENSIONS = {'pdf'}
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-# Global variables for models
-text_gen = None
-image_pipe = None
-style_refs = None
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
+# PDF Processing Functions
 def extract_text_from_pdf(pdf_path):
-    if not PDF_SUPPORT:
-        return None
-    try:
-        text = ""
-        with open(pdf_path, "rb") as file:
-            reader = PyPDF2.PdfReader(file)
-            for page in reader.pages:
-                text += page.extract_text()
-        return text
-    except Exception as e:
-        print(f"⚠ Error extracting text from PDF: {e}")
-        return None
+    text = ""
+    with open(pdf_path, "rb") as file:
+        reader = PyPDF2.PdfReader(file)
+        for page in reader.pages:
+            text += page.extract_text()
+    return text
 
 def extract_style_references(pdf_path, num_pages=5):
-    """Simplified style reference extraction"""
+    """Extract visual style references from PDF"""
+    # Placeholder implementation
     return {
         "color_palette": ["#2C3E50", "#E74C3C", "#ECF0F1"],
         "panel_layout": "dynamic",
         "art_style": "manhwa"
     }
 
+# Initialize global variables
+text_gen = None
+image_pipe = None
+style_refs = None
+panels = []
+
+# Load models
 def load_models(pdf_reference_path=None):
     global text_gen, image_pipe, style_refs
-    
-    print("🔄 Loading models...")
     
     # Text generation
     text_gen = pipeline(
@@ -75,7 +47,7 @@ def load_models(pdf_reference_path=None):
         model="distilgpt2",
         device="cuda" if torch.cuda.is_available() else "cpu"
     )
-    
+
     # Configure generation
     text_gen.model.config.do_sample = True
     text_gen.model.config.temperature = 0.7
@@ -83,10 +55,10 @@ def load_models(pdf_reference_path=None):
 
     # Image generation
     scheduler = EulerDiscreteScheduler.from_pretrained(
-        "runwayml/stable-diffusion-v1-5", 
+        "runwayml/stable-diffusion-v1-5",
         subfolder="scheduler"
     )
-    
+
     image_pipe = StableDiffusionPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5",
         scheduler=scheduler,
@@ -95,30 +67,37 @@ def load_models(pdf_reference_path=None):
         use_safetensors=True,
         variant="fp16"
     )
-    
+
     # Apply PDF style references if available
     style_refs = None
-    if pdf_reference_path and os.path.exists(pdf_reference_path) and PDF_SUPPORT:
+    if pdf_reference_path and os.path.exists(pdf_reference_path):
         style_refs = extract_style_references(pdf_reference_path)
         print(f"🎨 Loaded style references: {style_refs}")
-    
+
     # Device optimizations
     device = "cuda" if torch.cuda.is_available() else "cpu"
     image_pipe = image_pipe.to(device)
-    
+
     if torch.cuda.is_available():
         try:
             image_pipe.enable_xformers_memory_efficient_attention()
         except:
             print("⚠ Xformers not available, using default attention")
         image_pipe.enable_attention_slicing()
-    
-    print("✅ Models loaded!")
 
+    return text_gen, image_pipe, style_refs
+
+# Story generation
 def generate_story(prompt, panel_count, reference_text=None):
     ref_context = ""
     if reference_text:
-        ref_context = "\n\nMaintain the style and tone similar to the reference material."
+        vectorizer = TfidfVectorizer()
+        ref_vector = vectorizer.fit_transform([reference_text[:5000]])
+        prompt_vector = vectorizer.transform([prompt])
+        similarity = cosine_similarity(ref_vector, prompt_vector)[0][0]
+
+        if similarity > 0.3:
+            ref_context = "\n\nMaintain the style and tone similar to the reference material."
 
     template = f"""Create a {panel_count}-panel comic strip about: {prompt}{ref_context}
 
@@ -139,7 +118,10 @@ Panel 2: [Visual description]. [Action]. Characters: [list]. Dialogue: "[text]"
     )
     return result[0]["generated_text"]
 
+# Image generation
 def generate_panel_image(description, panel_num, style_refs=None, retries=2):
+    global panels
+    
     style_prompt = ""
     if style_refs:
         style_prompt = (
@@ -147,18 +129,18 @@ def generate_panel_image(description, panel_num, style_refs=None, retries=2):
             f"color scheme: {','.join(style_refs['color_palette'])}, "
             f"{style_refs['panel_layout']} composition"
         )
-    
+
     prompt = (
         f"Comic panel: {description}{style_prompt}, "
         "highly detailed, vibrant, clear outlines, "
         "dynamic perspective, professional comic art"
     )
-    
+
     negative_prompt = (
         "blurry, low quality, distorted, bad anatomy, "
         "text, watermark, signature, extra limbs"
     )
-    
+
     for attempt in range(retries + 1):
         try:
             image = image_pipe(
@@ -176,7 +158,7 @@ def generate_panel_image(description, panel_num, style_refs=None, retries=2):
                 font = ImageFont.truetype("Arial.ttf", 24) or ImageFont.load_default()
             except:
                 font = ImageFont.load_default()
-            
+
             # Speech bubble
             bubble_h = min(120, int(image.height * 0.25))
             bubble_y = image.height - bubble_h - 20
@@ -187,9 +169,10 @@ def generate_panel_image(description, panel_num, style_refs=None, retries=2):
                 outline="black",
                 width=3
             )
-            
-            # Dialogue (simplified)
-            wrapped_text = textwrap.wrap(f"Panel {panel_num}", width=28)
+
+            # Dialogue
+            dialogue = panels[panel_num-1]["dialogue"]
+            wrapped_text = textwrap.wrap(dialogue, width=28)
             for i, line in enumerate(wrapped_text[:3]):
                 draw.text(
                     (50, bubble_y + 25 + i*35),
@@ -209,106 +192,141 @@ def generate_panel_image(description, panel_num, style_refs=None, retries=2):
                 stroke_width=3,
                 stroke_fill="black"
             )
-            
+
             return image
-        
+
         except Exception as e:
             print(f"⚠ Error generating image: {e}")
             if attempt == retries:
                 return Image.new('RGB', (512, 512), color=(240, 240, 240))
             time.sleep(2)
 
+# Main generation function
 def generate_comic(prompt, panel_count=4, pdf_reference=None):
-    global style_refs
-    
+    global panels, style_refs, text_gen, image_pipe
+
     # Process PDF reference
     reference_text = None
-    if pdf_reference and PDF_SUPPORT:
+    if pdf_reference:
         try:
             reference_text = extract_text_from_pdf(pdf_reference)
         except Exception as e:
             print(f"⚠ Error processing PDF: {e}")
-    
+
     # Generate story
     story = generate_story(prompt, panel_count, reference_text)
-    
-    # Parse panels (simplified for demo)
+
+    # Parse panels
     panels = []
     for i in range(1, int(panel_count)+1):
-        panels.append({
-            "description": f"Scene {i} for: {prompt}",
-            "dialogue": f"Panel {i}"
-        })
-    
+        panel_marker = f"Panel {i}:"
+        if panel_marker in story:
+            start = story.find(panel_marker) + len(panel_marker)
+            end = story.find(f"Panel {i+1}:") if i < panel_count else len(story)
+            panel_text = story[start:end].strip()
+
+            # Extract components
+            dialogue = ""
+            if "Dialogue:" in panel_text:
+                dialogue_part = panel_text.split("Dialogue:")[1].strip()
+                if '"' in dialogue_part:
+                    dialogue = dialogue_part.split('"')[1].strip()
+                panel_text = panel_text.split("Dialogue:")[0].strip()
+
+            panels.append({
+                "description": panel_text,
+                "dialogue": dialogue if dialogue else f"Panel {i}"
+            })
+        else:
+            panels.append({
+                "description": f"Scene {i} for: {prompt}",
+                "dialogue": f"Panel {i}"
+            })
+
     # Generate images
     comic_images = []
     for i, panel in enumerate(panels):
         img = generate_panel_image(panel["description"], i+1, style_refs)
-        
-        # Convert to base64 for web
-        buffered = BytesIO()
-        img.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-        comic_images.append(img_str)
-    
-    return {
-        "story": story,
-        "pages": comic_images
-    }
+        comic_images.append(img)
 
-@app.route('/')
-def home():
-    return send_from_directory('static', 'index1.html')
+    # Create pages
+    pages = []
+    for i in range(0, len(comic_images), 2):
+        page = Image.new('RGB', (1024, 512), (250, 250, 250))
+        if i < len(comic_images):
+            page.paste(comic_images[i], (10, 10))
+        if i+1 < len(comic_images):
+            page.paste(comic_images[i+1], (522, 10))
+        pages.append(page)
 
-@app.route('/generate-comic', methods=['POST'])
-def generate_comic_endpoint():
-    if 'prompt' not in request.form:
-        return jsonify({"error": "Prompt is required"}), 400
-    
-    prompt = request.form['prompt']
-    panel_count = request.form.get('panel_count', '4')
-    
-    pdf_reference = None
-    if 'pdf_reference' in request.files:
-        file = request.files['pdf_reference']
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(pdf_path)
-            pdf_reference = pdf_path
-    
-    try:
-        result = generate_comic(prompt, int(panel_count), pdf_reference)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return story, pages
 
-def run_flask():
-    app.run(host='0.0.0.0', port=5000)
+# Gradio interface
+with gr.Blocks(title="AI Comic Generator with Reference") as demo:
+    gr.Markdown("""
+    # 🎨 AI Comic Generator with Reference
+    Create comics inspired by your reference PDF
+    """)
 
-if _name_ == '_main_':
-    # Load models first
-    load_models()
-    
-    # Create static directory if it doesn't exist
-    if not os.path.exists('static'):
-        os.makedirs('static')
-    
-    # Start Flask in a separate thread
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    # Start ngrok tunnel
-    try:
-        ngrok_tunnel = ngrok.connect(5000)
-        print('✨ Public URL:', ngrok_tunnel.public_url)
-    except Exception as e:
-        print(f"⚠ Ngrok error: {e}")
-        print("Using Colab's built-in preview instead")
-        from google.colab.output import eval_js
-        print("Your app will be available at:", eval_js("google.colab.kernel.proxyPort(5000)"))
-    
-    # Keep the Colab cell running
-    while True:
-        time.sleep(1)
+    with gr.Row():
+        with gr.Column(scale=2):
+            pdf_input = gr.File(
+                label="Upload Reference PDF (Optional)",
+                type="filepath",
+                file_types=[".pdf"]
+            )
+            prompt_input = gr.Textbox(
+                label="Your Comic Idea",
+                placeholder="e.g., A hunter awakening in a dungeon",
+                lines=2
+            )
+            panel_slider = gr.Slider(2, 8, value=4, step=1, label="Number of Panels")
+            generate_btn = gr.Button("Generate Comic", variant="primary")
+
+        with gr.Column(scale=3):
+            story_output = gr.Textbox(label="Generated Script", lines=8)
+
+    with gr.Tabs():
+        page_outputs = []
+        for i in range(4):
+            with gr.Tab(f"Page {i+1}"):
+                page_output = gr.Image(label=f"Page {i+1}", type="pil")
+                page_outputs.append(page_output)
+
+    def generate_with_reference(pdf_file, prompt, panel_count):
+        global text_gen, image_pipe, style_refs
+
+        # Reload models with PDF reference if provided
+        pdf_path = pdf_file.name if pdf_file else None
+        text_gen, image_pipe, style_refs = load_models(pdf_path)
+
+        story, pages = generate_comic(prompt, int(panel_count), pdf_path)
+
+        # Format output
+        output_images = []
+        for i in range(4):
+            if i < len(pages):
+                output_images.append(pages[i])
+            else:
+                blank = Image.new('RGB', (1024, 512), (240, 240, 240))
+                output_images.append(blank)
+
+        return [story] + output_images
+
+    generate_btn.click(
+        fn=generate_with_reference,
+        inputs=[pdf_input, prompt_input, panel_slider],
+        outputs=[story_output] + page_outputs
+    )
+
+# Initial load
+print("🔄 Loading models...")
+text_gen, image_pipe, style_refs = load_models()
+print("✅ Models ready!")
+
+# Launch with error handling
+try:
+    demo.launch(share=True, server_port=7860)
+except OSError:
+    print("🔄 Port 7860 busy, trying 7861...")
+    demo.launch(share=True, server_port=7861)
